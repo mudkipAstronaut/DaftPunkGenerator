@@ -33,6 +33,7 @@ def read_midi(file):
 
     #grouping based on different instruments
     s2 = instrument.partitionByInstrument(midi)
+    flatNotes = 0
 
     #looping over all instruments
     try:
@@ -45,9 +46,12 @@ def read_midi(file):
         #file has notes in flat structure?
         #file has no part attribute so no instrument detected?
         notes_to_parse = midi.flat.notes
+        flatNotes+=1
     if(notes_to_parse == None):
         notes_to_parse = midi.flat.notes
+        flatNotes+=1
 
+    print("flatNotes: " + str(flatNotes))
     #finding whether a particular element is note or chord
     for element in notes_to_parse:
         if isinstance(element, note.Note):
@@ -104,7 +108,7 @@ def WaveNet(unique_x, unique_y):
     model = Sequential()
 
     #embedding layer
-    model.add(Embedding(len(unique_x), 100, input_length=32, trainable=True))
+    model.add(Embedding(len(unique_x), 100, input_length=64, trainable=True))
 
     model.add(Conv1D(64,3, padding='causal', activation='relu'))
     model.add(Dropout(0.2))
@@ -141,7 +145,7 @@ def train_model(model, x_tr, y_tr, x_val, y_val):
     history = model.fit(
         np.array(x_tr), np.array(y_tr), 
         batch_size=128,
-        epochs=50,
+        epochs=60,
         validation_data=(np.array(x_val),np.array(y_val)),
         verbose=1,
         callbacks=[mc]
@@ -154,7 +158,7 @@ def predict(x_val, no_timesteps, weigths, unique_x):
     random_music = x_val[ind]
 
     predictions=[]
-    for i in range(20):
+    for i in range(128):
         random_music = random_music.reshape(1,no_timesteps)
 
         prob = model.predict(random_music)[0]
@@ -171,7 +175,7 @@ def predict(x_val, no_timesteps, weigths, unique_x):
     return predicted_notes
 
 if __name__ == "__main__":
-    no_timesteps = 70
+    no_timesteps = 128
     if(str(sys.argv[1]) == "--train"):
         #load midi files
 

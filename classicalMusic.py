@@ -1,5 +1,7 @@
 from music21 import *
 import os
+import sys
+import pickle
 import numpy as np
 
 #to understand and graph the initial data
@@ -8,6 +10,17 @@ import matplotlib.pyplot as plt
 
 #to separate the data
 from sklearn.model_selection import train_test_split
+
+#models from tensorflow
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras.layers import *
+from tensorflow.keras.models import *
+from tensorflow.keras.callbacks import *
+import tensorflow.keras.backend as K
+
+#to predict new data
+import random
 
 def read_midi(file):
     print("Loading Music File: ", file)
@@ -22,18 +35,25 @@ def read_midi(file):
     s2 = instrument.partitionByInstrument(midi)
 
     #looping over all instruments
-    for part in s2.parts:
-        print(str(part))
-        #select elements of only piano
-        if 'Piano' in str(part):
-            notes_to_parse = part.recurse()
+    try:
+        for part in s2.parts:
+            print("Instruments found: " + str(len(part)))
+            #select elements of only piano
+            if 'Piano' in str(part):
+                notes_to_parse = part.recurse()
+    except: 
+        #file has notes in flat structure?
+        #file has no part attribute so no instrument detected?
+        notes_to_parse = midi.flat.notes
+    if(notes_to_parse == None):
+        notes_to_parse = midi.flat.notes
 
-            #finding whether a particular element is note or chord
-            for element in notes_to_parse:
-                if isinstance(element, note.Note):
-                    notes.append(str(element.pitch))
-                elif isinstance(element, chord.Chord):
-                    notes.append('.'.join(str(n) for n in element.normalOrder))
+    #finding whether a particular element is note or chord
+    for element in notes_to_parse:
+        if isinstance(element, note.Note):
+            notes.append(str(element.pitch))
+        elif isinstance(element, chord.Chord):
+            notes.append('.'.join(str(n) for n in element.normalOrder))
     return np.array(notes)
 
 def convert_to_midi(prediction_output):
@@ -59,7 +79,7 @@ def convert_to_midi(prediction_output):
 
         #pattern is a note
         else:
-            new_note = note.Pattern(pattern)
+            new_note = note.Note(pattern)
             new_note.offset = offset
             new_note.storedInstrument = instrument.Piano()
             output_notes.append(new_note)
@@ -69,86 +89,196 @@ def convert_to_midi(prediction_output):
     midi_stream = stream.Stream(output_notes)
     midi_stream.write('midi', fp='music.mid')
 
+def lstm(unique_notes):
+    model = Sequential()
+    model.add(LSTM(128,return_sequences=True))
+    model.add(LSTM(128))
+    model.add(Dense(256))
+    model.add(Activation('relu'))
+    model.add(Dense(unique_notes))
+    model.add(Activation('softmax'))
+    model.compile(loss='sparse_categorical_crossentropy', optimizer='adam')
+    return model
+
+def WaveNet(unique_x, unique_y):
+    model = Sequential()
+
+    #embedding layer
+    model.add(Embedding(len(unique_x), 100, input_length=32, trainable=True))
+
+    model.add(Conv1D(64,3, padding='causal', activation='relu'))
+    model.add(Dropout(0.2))
+    model.add(MaxPool1D(2))
+
+    model.add(Conv1D(128,3,activation='relu',dilation_rate=2,padding='causal'))
+    model.add(Dropout(0.2))
+    model.add(MaxPool1D(2))
+
+    model.add(Conv1D(256,3,activation='relu',dilation_rate=4,padding='causal'))
+    model.add(Dropout(0.2))
+    model.add(MaxPool1D(2))
+
+    #model.add(Conv1D(256,5,activation='relu'))
+    model.add(GlobalMaxPool1D())
+
+    model.add(Dense(256,activation='relu'))
+    model.add(Dense(len(unique_y), activation='softmax'))
+
+    model.compile(loss='sparse_categorical_crossentropy', optimizer='adam')
+
+    return model
+
+def train_model(model, x_tr, y_tr, x_val, y_val):
+    """train the neural network"""
+    filepath = "weigths-improvement-{epoch:02d}-{loss:.4f}-bigger.hdf5"
+    mc = ModelCheckpoint(
+        filepath,
+        monitor='val_loss',
+        mode='min',
+        save_best_only=True,
+        verbose=1
+    )
+    history = model.fit(
+        np.array(x_tr), np.array(y_tr), 
+        batch_size=128,
+        epochs=50,
+        validation_data=(np.array(x_val),np.array(y_val)),
+        verbose=1,
+        callbacks=[mc]
+        )
+
+def predict(x_val, no_timesteps, weigths, unique_x):
+    model = load_model(str(weigths))
+
+    ind = np.random.randint(0,len(x_val)-1)
+    random_music = x_val[ind]
+
+    predictions=[]
+    for i in range(20):
+        random_music = random_music.reshape(1,no_timesteps)
+
+        prob = model.predict(random_music)[0]
+        y_pred = np.argmax(prob,axis=0)
+        predictions.append(y_pred)
+
+        random_music=np.insert(random_music[0], len(random_music[0]), y_pred)
+        random_music=random_music[1:]
+    
+    #convert the predictions back to notes
+    x_int_to_note = dict((number, note_) for number, note_ in enumerate(unique_x))
+    predicted_notes = [x_int_to_note[i] for i in predictions]
+    
+    return predicted_notes
+
 if __name__ == "__main__":
-    #load midi files
+    no_timesteps = 70
+    if(str(sys.argv[1]) == "--train"):
+        #load midi files
 
-    #specify path
-    path='smallData/'
+        #specify path
+        path='smallData/'
 
-    #read all the filenames
-    files=[i for i in os.listdir(path) if i.endswith(".mid")]
+        #read all the filenames
+        files=[i for i in os.listdir(path) if i.endswith(".mid")]
 
-    #reading each midi
-    notes_array = np.array([read_midi(path+i) for i in files])
+        #reading each midi
+        notes_array = np.array([read_midi(path+i) for i in files])
 
-    notes_ = [element for note_ in notes_array for element in note_]
+        notes_ = [element for note_ in notes_array for element in note_]
 
-    #num of unique notes
-    unique_notes = list(set(notes_))
-    #print(len(unique_notes))
+        #num of unique notes
+        #this is n_vocab
+        unique_notes = list(set(notes_))
+        #print(len(unique_notes))
 
 
-    #computing frequency of each note
-    freq = dict(Counter(notes_))
+        #computing frequency of each note
+        freq = dict(Counter(notes_))
 
-    #consider only the frequencies
-    no=[count for _, count in freq.items()]
+        #consider only the frequencies
+        no=[count for _, count in freq.items()]
 
-    #set the figure size
-    #plt.figure(figsize=(5,5))
-    #plt.hist(no)
-    #plt.show()
+        #set the figure size
+        #plt.figure(figsize=(5,5))
+        #plt.hist(no)
+        #plt.show()
 
-    #threshold
-    thresh = 15
-    frequent_notes = [note_ for note_, count in freq.items() if count >= thresh]
-    #print(len(frequent_notes))
+        #threshold
+        thresh = 15
+        frequent_notes = [note_ for note_, count in freq.items() if count >= thresh]
+        #print(len(frequent_notes))
 
-    #prep new music w only the top freqs
-    new_music=[]
-    for notes in notes_array:
-        temp=[]
-        for note_ in notes:
-            if note_ in frequent_notes:
-                temp.append(note_)
-        new_music.append(temp)
+        #prep new music w only the top freqs
+        new_music=[]
+        for notes in notes_array:
+            temp=[]
+            for note_ in notes:
+                if note_ in frequent_notes:
+                    temp.append(note_)
+            new_music.append(temp)
 
-    new_music = np.array(new_music)
+        new_music = np.array(new_music)
 
-    #preping the data
-    no_timesteps = 32
-    x = []
-    y = []
+        #preping the data
+        x = []
+        y = []
 
-    for note_ in new_music:
-        for i in range(0, len(note_) - no_timesteps, 1):
-            #preparing input/output sequence
-            input_ = note_[i:i+no_timesteps]
-            output_ =  note_[i+no_timesteps]
+        for note_ in new_music:
+            for i in range(0, len(note_) - no_timesteps, 1):
+                #preparing input/output sequence
+                input_ = note_[i:i+no_timesteps]
+                output_ =  note_[i+no_timesteps]
 
-            x.append(input_)
-            y.append(output_)
-    
-    x=np.array(x)
-    y=np.array(y)
-    
-    unique_x = list(set(x.ravel()))
-    x_note_to_int = dict((note_, number) for number, note_ in enumerate(unique_x))
+                x.append(input_)
+                y.append(output_)
+        
+        x=np.array(x)
+        y=np.array(y)
+        
+        unique_x = list(set(x.ravel()))
+        x_note_to_int = dict((note_, number) for number, note_ in enumerate(unique_x))
 
-    x_seq=[]
-    for i in x:
-        temp=[]
-        for j in i:
-            #assign unique integer to every note
-            temp.append(x_note_to_int[j])
-        x_seq.append(temp)
-    x_seq=np.array(x_seq)
+        x_seq=[]
+        for i in x:
+            temp=[]
+            for j in i:
+                #assign unique integer to every note
+                temp.append(x_note_to_int[j])
+            x_seq.append(temp)
+        x_seq=np.array(x_seq)
 
-    unique_y = list(set(y))
-    y_note_to_int = dict((note_, number) for number, note_ in enumerate(unique_y))
-    y_seq=np.array([y_note_to_int[i] for i in y])
+        unique_y = list(set(y))
+        y_note_to_int = dict((note_, number) for number, note_ in enumerate(unique_y))
+        y_seq=np.array([y_note_to_int[i] for i in y])
 
-    #we will preserve 80% of data for training and 20% for evaluation
-    x_tr, x_val, y_tr, y_val = train_test_split(x_seq, y_seq, test_size=0.2, state=0)
+        #we will preserve 80% of data for training and 20% for evaluation
+        x_tr, x_val, y_tr, y_val = train_test_split(x_seq, y_seq, test_size=0.2, random_state=0)
 
-    def lstm():
+        #write the params of the last training so we can use it in the predict
+        with open('x_val.npy','wb') as f:
+            #np.ndarray type
+            np.save(f, x_val) 
+            f.close()
+        with open('unique_x.npy', 'wb') as f:
+            #list type
+            pickle.dump(unique_x,f)
+            f.close()
+        
+        #here we can train the network
+        train_model(WaveNet(unique_x,unique_y),x_tr,y_tr,x_val,y_val)
+
+    elif(str(sys.argv[1]) == "--predict"):
+        #predict music
+        x_val = None
+        unique_x = None
+        with open('x_val.npy', 'rb') as f:
+            x_val = np.load(f)
+            f.close()
+        with open('unique_x.npy', 'rb') as f:
+            unique_x = pickle.load(f)
+            f.close()
+        
+        predicted_notes = predict(x_val, no_timesteps, str(sys.argv[2]), unique_x)
+        convert_to_midi(predicted_notes)
+    else:
+        print("options are --train or --predict filepath")  
